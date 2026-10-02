@@ -2,70 +2,78 @@
 
 [![Host Firmware Tests](https://github.com/xiaoli5201314-spec/stm32-ecg-heart-rate-monitor/actions/workflows/ci.yml/badge.svg)](https://github.com/xiaoli5201314-spec/stm32-ecg-heart-rate-monitor/actions/workflows/ci.yml)
 
-**面向 STM32 移植的 C99 信号处理核心，包含可在 PC 复现的采样仿真、滤波、QRS 检测与二进制通信回环。**
+**面向 STM32 的 C99 心电信号处理项目，贯通采样缓冲、数字滤波、QRS 检测、心率计算与二进制通信。**
 
-这个项目把“采样数据如何可靠送入算法、算法如何输出可核验结果、结果如何变成可恢复的字节流”串成一条可阅读、可测试的工程链路，适合嵌入式软件、信号处理和测试工程方向的技术交流。
+本仓库展示项目的公开代码与技术文档。公开内容围绕单通道心电数据流展开，包括 C99 DSP 核心、设备层集成、PC HAL 采样仿真、协议编解码、自动化测试与 NumPy 数值复核工具。
 
-**当前交付是固件核心与 PC 测试环境，不是已完成的心电硬件产品。** 仓库没有 PCB/原理图、实际 STM32 外设驱动、可烧录镜像或 VC++/MFC 上位机工程。
+项目体现了嵌入式软件开发中的几项关键能力：划分算法与平台接口、管理采集与处理之间的数据流、设计可解析的通信协议，以及用合成信号和参考计算核验算法输出。以下运行结果统一标注为**主机验证 / 合成信号分析**。
 
-| 项目速览 | 当前内容 |
+## 项目概览
+
+| 项目速览 | 公开内容 |
 |---|---|
 | 技术栈 | C99、GNU Make/GCC、SPSC 环形缓冲、IIR、Savitzky-Golay、CRC-16；可选 NumPy 复核 |
-| 目标配置 | STM32F103C8T6；250 Hz 单通道、12-bit ADC 模型；板级移植尚未提供 |
+| 目标配置 | 按 STM32F103C8T6 组织采样参数与 HAL 接口；默认 250 Hz 单通道、12-bit ADC 采样模型 |
 | 核心链路 | ADC counts → 标定换算 → 双级高通 → 双级 50 Hz 陷波 → SG → QRS/RR/BPM → 帧协议 |
-| 已执行验证 | **2026-10-02，Ubuntu 22.04 / GCC 11.4.0：28 个套件、4171 条断言、0 失败；pthread 400000 个样本** |
-| 数值交叉复核 | 同日 C 系数/CSV 导出与 WSL / NumPy 1.21.5 复核 PASS；全链路逐点最大差异 `5.060e-07 uV` |
-| 证据范围 | 上述结果来自主机合成信号与 PC HAL 桩，不是电极输入、板级实时性或临床测试 |
+| 主机测试记录 | Ubuntu 22.04 / GCC 11.4.0：**28 个套件、4171 条断言、0 失败**；pthread 实际转移 **400000 个样本** |
+| 数值交叉复核 | WSL / NumPy 1.21.5：C 系数与 CSV 复核 PASS；全链路逐点最大差异 `5.060e-07 uV` |
+| 数据与展示 | PC 合成 P/Q/R/S/T 波形、工频/漂移/噪声叠加、ASCII 演示、CSV 导出与可选绘图 |
+| 自动化 | GitHub Actions 在 push、PR 和手动触发时执行 Ubuntu GCC 主机测试 |
 
-运行命令、来源和待验证项目见 [验证记录](docs/VERIFICATION.md)。GitHub Actions 自动执行主机测试，当前运行状态见首页徽章；NumPy 交叉复核另列为本地验证。
+希望快速了解项目，可先看下方的工程亮点与测量结果；技术阅读可从 [源码导览](#源码导览) 和 [设计文档](docs/DESIGN.md) 开始。按日期整理的执行命令与工具链见 [验证记录](docs/VERIFICATION.md)。
 
-## 先看哪些能力
+## 工程亮点
 
-- **模块边界清楚：** 算法、设备集成、HAL 分层。单样本 DSP 接口不依赖 STM32 寄存器，PC 桩让同一套设备逻辑参与回环测试。
-- **滤波参数可推导：** 50 Hz 双二阶陷波在运行时按采样率/频率/Q 设计；SG 不靠固定系数表，而是由阶数和窗长求解最小二乘核。
-- **考虑流式启动：** 高通和导数用首样本自举，SG 明确区分预热与稳态；QRS 学习期、RR 初始先验和异常值剔除有显式规则。
-- **考虑采集与处理解耦：** 模拟 DMA 半满/全满回调通过泛型 SPSC 环送给主循环，记录高水位、溢出及丢点；Linux 双线程测试覆盖索引发布顺序。
-- **协议不仅有打包：** PACK12/DELTA 自动比较长度，CRC-16 校验，滑动窗口接收器覆盖半包、粘包、坏帧和垃圾数据的既定场景。
-- **指标有可追溯定义：** 测试输出 SG 参数扫描、心率误差和端到端统计；可选 Python 从 C 导出系数/CSV 复现滤波，而不把演示数据写成硬件实测。
+- **分层组织算法与设备逻辑：** `ecg_pipeline_t` 管理单样本 DSP 状态，`ecg_device_t` 串联 DMA 回调、采样环、组帧与 UART；HAL 接口承接平台操作。
+- **按参数生成滤波系数：** 双二阶陷波根据采样率、中心频率和 Q 设计；SG 根据阶数与窗长求解最小二乘核，配套系数、频响和参数扫描测试。
+- **显式处理流式启动：** 高通和导数采用首样本自举，SG 区分预热与稳态，QRS 检测包含学习期、RR 初始先验和异常间期筛选。
+- **采集与处理解耦：** 模拟 DMA 半满/全满回调把数据送入泛型 SPSC 环，记录高水位、溢出与丢点；Linux pthread 压力测试核验样本顺序。
+- **覆盖通信收发两端：** PACK12/DELTA 按可用范围与编码长度选择，CRC-16 校验帧内容，滑动窗口接收器处理半包、粘包、CRC 错误及垃圾字节。
+- **从单元测试走到整链路复核：** 模块测试与模拟 DMA/UART 回环结合，C 导出的系数和 CSV 再由 NumPy 重算，形成可追踪的数值与数据流验证路径。
 
 ## 主机验证结果
 
-以下为 **2026-10-02 的实际执行记录**，输入是默认 250 Hz、72 BPM 的 30 s 合成 CSV。原始命令、工具链、指标定义与证据边界见 [VERIFICATION.md](docs/VERIFICATION.md)。
+以下为 [验证记录](docs/VERIFICATION.md) 中 **2026-10-02 的已执行结果**。C 主机测试覆盖滤波、心率、标定、缓冲与协议；数值分析采用默认 250 Hz、72 BPM 的 **30 s / 7500 点合成 CSV**。
 
-| 指标 | 本次结果 | 解释 |
+| 指标 | 已记录结果 | 输入与统计方法 |
 |---|---|---|
-| C 与 NumPy 系数最大差异 | `4.645e-13` | 陷波与 SG 系数的交叉复核 |
-| 全链路逐点最大差异 | `5.060e-07 uV` | C 导出与 NumPy 流式复现的一致性，不是对真实心电的误差 |
-| 50 Hz 分量 RMS | `212.43 → 0.0510 uV`，`-72.4 dB` | 合成记录全链路输出中的单频分量，不是硬件陷波深度 |
-| SG 单级峰高保持率 | 平均 **98.39%**，最差 **98.38%** | 干净参考上对齐的 SG 核分析，不是整条链的保持率 |
-| 全链路峰高保持率 | 干净参考平均 **89.74%**；含干扰平均 **88.64%**、最差 **81.39%** | 必须同时呈现滤波引入的形态变化，不能只展示 SG 单级数字 |
-| 导出心搏通知推算心率 | 真值 `72 BPM`，结果 `72.12 BPM` | 按通知索引的中位 RR 推算；不等于临床准确率 |
+| C 主机测试 | **28 套件 / 4171 断言 / 0 失败** | 默认 C99 配置，Ubuntu 22.04 / GCC 11.4.0 |
+| SPSC 并发压力 | **400000 个样本** | Linux pthread 生产者与消费者实际转移 |
+| C 与 NumPy 系数最大差异 | `4.645e-13` | C 导出陷波/SG 系数与 NumPy 重算系数 |
+| 全链路逐点最大差异 | `5.060e-07 uV` | 从 C 原始 ADC counts 逐样本复现流式输出 |
+| 50 Hz 分量 RMS | `212.43 → 0.0510 uV`，`-72.4 dB` | 合成记录全链路输入/输出的 50 Hz 单频投影 |
+| SG 单级峰高保持率 | 平均 **98.39%**，最差 **98.38%** | 对干净合成参考执行对齐的 SG 中心核分析 |
+| 全链路峰高保持率：干净输入 | 平均 **89.74%** | 对干净参考执行高通、陷波与 SG，观察完整滤波链的形态变化 |
+| 全链路峰高保持率：含干扰输入 | 平均 **88.64%**，最差 **81.39%** | 含工频、漂移与噪声的 C 输出相对干净参考 |
+| 导出心搏通知推算心率 | 真值 `72 BPM`，结果 `72.12 BPM` | 按 CSV 心搏通知索引的中位 RR 推算，绝对差 `0.12 BPM` |
 
-峰高按脚本的抛物线峰值拟合及 PQ 段局部基线定义。Python 的 PASS 检查系数、逐点复现和 SG 平均保持率；**并没有要求全链路保持率达到 95%**。NumPy 复核目前是本地验证，不在远程 CI 中执行。
+SG 单级与全链路分别展示平滑阶段和组合滤波的结果，反映不同处理范围下的幅值与干扰抑制取舍。峰高分析跳过前 2 s，按相关性选择整数滞后对齐，再用抛物线峰值拟合减去 R 峰前 48..120 ms 的 PQ 段中位基线。
+
+NumPy 的通过条件由**系数差异 `<1e-9`、全链路逐点差异 `<1e-4 uV`、SG 单级平均峰高保持率 `>=95%`**组成；全链路峰高、50 Hz 分量和通知推算心率作为分析指标同时展示。C 主机测试由 CI 自动执行，NumPy 结果记录于本地 WSL 验证。
 
 ## 文档导航
 
 | 文档 | 适合查看的内容 |
 |---|---|
 | [DESIGN.md](docs/DESIGN.md) | 分层、时序、滤波推导、QRS、标定、数值与资源取舍 |
-| [BUILD_AND_TEST.md](docs/BUILD_AND_TEST.md) | Linux/WSL 构建、测试阈值、数据导出、NumPy 复核与目标板构建边界 |
-| [PROTOCOL.md](docs/PROTOCOL.md) | 真实帧字节、大小端、CRC 覆盖、载荷缩放、编码示例与解析限制 |
-| [VERIFICATION.md](docs/VERIFICATION.md) | 已执行命令、日期/工具链、测试汇总及待验证项目 |
+| [BUILD_AND_TEST.md](docs/BUILD_AND_TEST.md) | Linux/WSL 构建、测试条件、数据导出、NumPy 复核与各 Make 目标 |
+| [PROTOCOL.md](docs/PROTOCOL.md) | 帧字节布局、大小端、CRC 覆盖、载荷缩放、编码示例与接收器行为 |
+| [VERIFICATION.md](docs/VERIFICATION.md) | 按日期整理的执行命令、工具链、测试汇总与指标定义 |
 
-## 系统架构与完成度
+## 系统架构
 
-实线是当前源码中的 PC 仿真与固件核心；虚线是尚待补齐的真实板级输入。图中“接收”是 C 协议同步器，不是已有 GUI。
+下图对应公开代码的**主机合成采样 → C99 DSP 与设备集成 → 字节流回环验证**。采样源、DMA 回调和 UART 捕获由 PC HAL 模型组织，处理与协议模块通过各自的 C 接口衔接。
 
 ```mermaid
 flowchart LR
-    subgraph PC["已实现：PC HAL 桩"]
+    subgraph PC["主机合成采样"]
         SYN["合成 P/Q/R/S/T<br/>工频、漂移、噪声"]
         MODEL["增益与中点偏置<br/>理想饱和 ADC"]
         DMA["128 点循环 DMA 模型<br/>每半块 64 点回调"]
         SYN --> MODEL --> DMA
     end
 
-    subgraph CORE["已实现：C99 固件核心"]
+    subgraph CORE["C99 DSP 与设备集成"]
         ISR["DMA 回调<br/>拷贝与丢点记账"]
         RING["1024 点 SPSC 采样环"]
         CAL["counts 转电极参考 uV"]
@@ -80,42 +88,33 @@ flowchart LR
         SG --> FRAME --> TX
     end
 
-    subgraph HOST["已实现：主机回环验证"]
+    subgraph HOST["字节流回环验证"]
         UART["UART 字节内存捕获"]
         SYNC["滑动窗口同步与 CRC"]
         CHECK["载荷解码<br/>样本、序号与心率检查"]
         UART --> SYNC --> CHECK
     end
 
-    BOARD["待实现：安全的模拟前端与 PCB<br/>STM32 定时器 / ADC / DMA / UART 端口"]
     DMA --> ISR
     TX --> UART
-    BOARD -.-> ISR
 ```
 
-### 实现状态矩阵
+### 核心模块
 
-“已有”指文件中有实现，不等同于任意平台/输入已经验证。
-
-| 模块 | 源码状态 | 验证/交付边界 |
+| 模块 | 公开实现 | 工程关注点 |
 |---|---|---|
-| 高通、双级陷波、SG 流式/整段处理 | 已有 | 默认 double 主机测试及本地 NumPy 复核已通过；启动与边缘行为不同 |
-| QRS、RR 中位数、BPM、SQI | 已有 | 合成信号测试已通过；无真实心电数据库/临床有效性证据 |
-| HRV 统计接口 | 已有，但有已知单位问题 | `sdnn_ms` 实际仍按 RR 采样点计算，不能作为可靠毫秒结果使用 |
-| 多点标定拟合与平台均值 | 已有 | 测试输入为模拟平台；默认比例是标称值，`valid=0` |
-| SPSC 环、DMA 回调、主循环集成 | 已有 | PC 模型与 Linux pthread 测试已通过；无实际中断时延测量 |
-| 波形/HR/STATUS 上报与接收同步器 | 已有 | PC 字节流回环测试已通过；尚无真串口链路/背压可靠性保证 |
-| CALIBRATION / ACK | 部分实现 | 构造工具存在，CAL 有解析器；没有设备自动上报/命令确认闭环 |
-| NAK / HOST_CMD | 仅枚举 | 未定义载荷与处理器 |
-| STM32 定时器、ADC、DMA、UART 端口 | 未提供 | 配置宏与 HAL 接口不等于实际外设驱动 |
-| PCB、模拟滤波、RLD、电极保护 | 未提供 | 仅有目标参数；PC 桩不模拟其电路或电气安全 |
-| 可烧录固件、启动代码、链接脚本 | 未提供 | `make arm` 仅编译检查，不产生镜像 |
-| VC++/MFC 或其他 GUI | 未提供 | 当前有 ASCII 演示、CSV 和协议接收工具 |
-| Ubuntu GCC CI | 自动执行；状态见首页徽章 | 推送/PR/手动触发后执行主机测试；不包含硬件验收 |
+| [DSP 流水线](firmware/src/ecg_pipeline.c) | 标定换算、高通、陷波、SG 和 QRS 按单样本顺序处理 | 统一单位、状态复位与批处理入口 |
+| [IIR 滤波](firmware/src/iir_notch.c) | 两级单极高通与可配置级联双二阶陷波 | 系数设计、状态递推与频率响应 |
+| [SG 平滑](firmware/src/savgol.c) | 最小二乘核设计、整段处理与流式窗口 | 部分主元求解、边缘缩窗、预热与延迟对齐 |
+| [QRS 与心率](firmware/src/heart_rate.c) | 导数、平方、积分、自适应阈值、峰值细化与 RR 中位数 | 学习期、不应期、T 波规则与信号质量估计 |
+| [采样环形缓冲](firmware/src/ring_buffer.c) | 泛型 SPSC，支持 `uint16` 样本和字节队列 | 索引发布、容量管理、高水位与溢出统计 |
+| [通信协议](firmware/src/frame_protocol.c) | 波形/心率/状态组帧、PACK12/DELTA、CRC 和同步接收 | 长度选择、字节布局与错误后重新同步 |
+| [PC HAL](firmware/hal/hal_stub.c) | 合成信号、ADC 量化、DMA 分块回调与 UART 捕获 | 在主机上驱动设备层与通信回环 |
+| [NumPy 复核](tools/verify_filters.py) | 读取 C 系数/CSV、重算 SG 核与流式滤波、分析波形 | 逐点差异、频率分量、峰高保持与可选绘图 |
 
 ## 工程细节
 
-### 1. 数据单位与标定边界
+### 1. 数据单位与标定
 
 [ecg_pipeline.c](firmware/src/ecg_pipeline.c) 的数据流为：
 
@@ -127,38 +126,44 @@ uint16 ADC counts
   -> QRS 检测 / 四舍五入与 int16 饱和 / 波形组帧
 ```
 
-标称 3.3 V、12-bit、增益 1000 时，比例为 `3300*1000/4096/1000 ≈ 0.805664 uV/count`，这是配置推算值，不是硬件分辨率实测。默认截距为 0，换算值仍含中点偏置对应的直流，随后由高通处理。
+默认采样模型采用 3.3 V 参考、12-bit ADC 与标称增益 1000，对应配置比例：
 
-标定 API 接收 2..8 个调用方提供的 `(mV, counts)` 点，做线性拟合并输出增益、R² 和残差指标。它没有实现标准信号源、真实平台采集、硬件切换或持久化流程；测试中的平台差值也不能代替 ADC 零点校准。
+```text
+3300 × 1000 / 4096 / 1000 ≈ 0.805664 uV/count
+```
+
+默认截距为 0，换算值包含模型中点偏置对应的直流，随后交给高通处理。`ecg_cal_fit()` 接收调用方提供的 2..8 个 `(mV, counts)` 点，通过线性拟合输出斜率、截距、增益、R² 与残差指标；`ecg_cal_plateau_mean()` 用三点中值处理后求均值。主机测试用模拟平台数据核验这些计算。
 
 ### 2. 采样、缓冲与任务调度
 
-| 参数 | 当前默认值 | 含义 |
+| 参数 | 默认值 | 在公开代码中的作用 |
 |---|---|---|
-| 采样率 | 250 Hz / 4 ms | 仿真与算法的时间基准 |
-| 定时器目标参数 | 72 MHz，PSC=287，ARR=999 | 宏中规划值；未配置真实 TIM2 寄存器 |
-| DMA 缓冲 | 128 个 `uint16` | 每半块 64 点；相当于 256 ms 数据 |
-| ADC 采样环 | 1024 点 | `1024/250 = 4.096 s` 容量，不是无条件可拖延这么久 |
-| 单次读取块 | 最多 256 点 | `ecg_device_task()` 会循环读取到环空，并非每次调用最多处理 256 点 |
-| 波形组帧 | 24 点 | 单个块代表 96 ms 数据；到达主循环的延迟另受 DMA 分块影响 |
-| TX 环 | 2048 字节 | 排队和 UART 丢失有统计，但未实现重传/背压重试 |
+| 采样率 | 250 Hz / 4 ms | 主机采样模型与算法的时间基准 |
+| 定时器配置参数 | 72 MHz，PSC=287，ARR=999 | 配置宏给出的 250 Hz 分频关系 |
+| DMA 缓冲 | 128 个 `uint16` | 每半块 64 点，对应 256 ms 合成采样数据 |
+| ADC 采样环 | 1024 点 | 按采样率折算为 4.096 s 的存储容量 |
+| 单次读取块 | 最多 256 点 | 主循环逐块读取，持续处理至采样环为空 |
+| 波形组帧 | 24 点 | 每块对应 96 ms 的样本时间跨度 |
+| TX 环 | 2048 字节 | 缓冲待发送字节，并配合设备统计记录发送与丢失数量 |
 
-DMA 回调通过 `ring_buffer.c` **逐元素 `memcpy`**，不是一次整块拷贝。GCC/Clang 分支用 acquire/release 发布索引；非 GNU 分支的屏障当前为空，不能宣称 Keil/IAR 并发正确性已验证。停止设备不会自动刷新未满的 DMA 半块或波形组帧块。
+`ecg_device_start()` 按“初始化 HAL → 绑定回调 → 启动 DMA → 启动采样定时器”的顺序组织操作。半满与全满回调统一进入采样环，主循环通过 `ecg_device_task()` 执行 DSP、波形组帧、心搏回调和发送队列排空。
+
+采样环采用逐元素 `memcpy`，GCC/Clang 分支通过 acquire/release 发布索引。DSP 上下文保存处理样本计数，设备运行统计记录采集与丢失样本、DMA 块、环溢出、帧和字节计数；Linux 双线程测试核验生产与消费之间的样本顺序。
 
 ### 3. 滤波与启动
 
-| 阶段 | 实际实现 | 取舍 |
+| 阶段 | 实现方式 | 处理特性 |
 |---|---|---|
-| 基线处理 | 两级 0.5 Hz 单极高通，首样本自举 | 减少初始 DC 阶跃对学习期的影响；可能改变慢变波形与幅值 |
-| 工频处理 | 两个 50 Hz、Q=8 的双二阶，转置直接 II 型 | 小状态量、频率可设计；IIR 相位非线性，不能宣称诊断带宽不受影响 |
-| 平滑 | SG 4 阶/17 点，归一化横坐标、正规方程、部分主元求解 | 默认参数在特定合成形态上验收，不是所有形态的最优解 |
-| SG 启动 | 前 16 点直通，第 17 点开始卷积 | 稳态 SG 延迟为 8 点/32 ms，不代表整条链固定延迟 |
+| 基线处理 | 两级 0.5 Hz 单极高通，首样本自举 | 处理低频漂移并减轻初始 DC 阶跃对学习期的影响 |
+| 工频处理 | 两个 50 Hz、Q=8 的双二阶，转置直接 II 型 | 用级联小状态滤波器处理工频分量；频率与 Q 可配置 |
+| 平滑 | SG 4 阶/17 点，归一化横坐标、正规方程、部分主元求解 | 参数扫描结合噪声增益和合成 QRS 峰高保持率分析 |
+| SG 启动 | 前 16 点直通，第 17 点开始卷积 | 窗口填满后进入稳态，中心核对应 8 点 / 32 ms 延迟 |
 
-SG 整段接口会在边缘缩窗，点数不足拟合阶数时复制输入；流式接口不是同一种首尾规则。二者内部区间需按半窗延迟对齐后再比较。默认 `double` 和 SG 求解/累加中的 double 工作都要在 Cortex-M3 上重新测量，不能从 PC 测试推算微秒级实时预算。
+SG 整段接口通过边缘缩窗处理首尾，点数不足拟合阶数时复制输入；流式接口保存最近一窗数据并逐点输出。比较二者内部区间时按半窗延迟对齐。默认 `ecg_real_t` 为 `double`，配置宏提供 `float` 选项；SG 系数求解使用 `double` 工作数据。
 
 ### 4. QRS 与心率
 
-[heart_rate.c](firmware/src/heart_rate.c) 实际使用：
+[heart_rate.c](firmware/src/heart_rate.c) 的检测路径：
 
 ```text
 5 点导数 -> 平方 -> 37 点滑动积分 -> 包络局部极大值
@@ -166,97 +171,155 @@ SG 整段接口会在边缘缩窗，点数不足拟合阶数时复制输入；�
   -> 历史窗口中的绝对峰值细化 -> RR 校验 -> 最近 5 个有效 RR 的中位数
 ```
 
-- 导数为 `(2x[n]+x[n-1]-x[n-3]-2x[n-4])/8`，不是旧注释中的两点差分。
-- 学习期 2 s，前约 250 ms 不参与最大包络统计；积分窗 37 点在 250 Hz 下为 148 ms。
-- 不应期 200 ms，T 波判别窗口 360 ms；噪声估计门控上限取 `min(360 ms, RR_median/2)`。
-- RR 接纳范围 300..2000 ms，获得至少 3 个有效间期后才使用相对中位数的 40% 偏差规则。
-- 超过 `1.66*RR_median` 未检出时降低后续候选阈值，不回查缓存中的漏搏。
-- SQI 为信号/噪声包络估计的启发式比例。源码的 `ECTOPIC` 名称在这里仅表示算法的 RR 异常标记，不是心律失常诊断。
+| 规则 | 默认参数与处理 |
+|---|---|
+| 导数 | `(2x[n]+x[n-1]-x[n-3]-2x[n-4])/8`，首样本初始化历史 |
+| 学习与积分 | 学习期 2 s；包络最大值统计从约 250 ms 后开始；37 点积分窗对应 148 ms |
+| 峰值筛选 | 不应期 200 ms，T 波判别窗口 360 ms |
+| 噪声门控 | 上限取 `min(360 ms, RR_median/2)` |
+| RR 接纳 | 300..2000 ms；至少 3 个有效间期后启用相对中位数的 40% 偏差规则 |
+| 心率平滑 | 最近 5 个有效 RR 的中位数换算 BPM |
+| 长间期处理 | 超过 `1.66*RR_median` 时降低后续候选阈值 |
+| SQI | 信号/噪声包络估计形成 0..100 的启发式质量分值 |
 
-### 5. 通信与可恢复性
+心搏输出包含检测类别、样本索引、RR 接纳标志和即时/平滑 BPM。设备层将 RR 换算为毫秒，并将 BPM 按 `×10` 的整数形式写入报告；`ECTOPIC` 字段承载算法的 RR 异常间期标记。
+
+### 5. 通信与字节流解析
 
 ```text
 A5 5A TYPE LEN SEQ_lo SEQ_hi PAYLOAD CRC_lo CRC_hi
 ```
 
-CRC-16/CCITT-FALSE 覆盖 TYPE、LEN、SEQ 和载荷，不包含同步字；CRC 本身小端发送。波形载荷是滤波后整数微伏，PACK12 精确范围 `[-2048,2047]`，超范围自动使用 DELTA。24 点 PACK12 为 38 字节载荷、46 字节整帧；DELTA 帧长取决于转义数量，不能把某次带宽数字当作固定指标。
+CRC-16/CCITT-FALSE 覆盖 TYPE、LEN、SEQ 和载荷，同步字单独用于定位；序号与 CRC 采用小端。波形载荷使用滤波后的整数微伏，先四舍五入并饱和到 `int16`，再选择紧凑编码。
 
-设备自动上报波形；心搏报告按处理样本时钟限频，常规报告间隔至少 300 ms；状态报告在主循环检查时达到至少 5 s 处理数据才发送。标定帧和 ACK 没有自动发送流程。具体字段、完整字节示例和接收器约束见 [PROTOCOL.md](docs/PROTOCOL.md)。
+- **PACK12：** 精确表示 `[-2048,2047] uV`；24 点对应 38 字节载荷、46 字节整帧。
+- **DELTA：** 通过差值和转义表示 `int16` 样本，编码长度随样本变化；超出 PACK12 范围时选择此格式。
+- **编码选择：** 在表示范围允许时比较两种载荷长度，选用更紧凑的形式。
+- **报告节奏：** 波形按 24 点组帧；常规心搏报告间隔至少 300 ms；主循环按处理样本时钟检查 5 s 状态报告周期。
+- **接收同步：** 滑动窗口结合同步字、长度和 CRC，测试覆盖分块输入、连续帧、错误帧与垃圾字节后的重新同步。
 
-## 快速复现与证据
+具体字段、完整字节示例和解析规则见 [PROTOCOL.md](docs/PROTOCOL.md)。
 
-Linux/WSL，在仓库根目录：
+## 快速复现
+
+### 1. 构建并运行主机测试
+
+环境为 Linux 或 WSL、GNU Make、GCC 和标准数学库。在仓库根目录执行：
 
 ```bash
-# 完整主机测试，强制重编译
 make -C firmware -B test CC=gcc
+```
 
-# 合成信号演示，不是 GUI 或真实板级采集
-make -C firmware demo CC=gcc
+默认构建启用 C99、告警检查与 `-Werror`；Linux 自动启用 pthread SPSC 测试。测试结束可查看套件/断言汇总及 `RESULT: ALL TESTS PASSED`。已执行结果为上文列出的 28 个套件、4171 条断言，原始命令与环境见 [VERIFICATION.md](docs/VERIFICATION.md)。
 
-# 导出 C 系数和 30 s 合成 CSV
+### 2. 导出合成信号并用 NumPy 复核
+
+使用已有 NumPy 环境，或创建独立环境：
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install numpy
+```
+
+生成本次 C 输出，检查三份文件后运行复核：
+
+```bash
 make -C firmware -B dump CC=gcc
-
-# 可选：需 NumPy，且必须确认读取本次 C 导出文件
+ls -l firmware/build/coefficients.txt firmware/build/raw_signal.csv firmware/build/filtered_signal.csv
 python3 tools/verify_filters.py
 ```
 
-[2026-10-02 的执行记录](docs/VERIFICATION.md) 包含主机测试、C 导出和 NumPy 复核；上面命令是显式指定 GCC/强制重编译的复现建议，演示模式尚无执行记录。Python 缺少导出文件会回退到自身合成数据；回退模式 `PASS` 不能证明 C 输出正确。依赖安装、文件检查、ARM 检查和全部验收阈值见 [构建与测试](docs/BUILD_AND_TEST.md)。
+`dump` 运行测试并导出 30 s 合成记录。复核时确认脚本日志加载了同一次 C 导出的三份文件，并显示全链路与 C 输出的逐点比较。
 
-当前测试可核验的主要验收条件：
+| 导出文件 | 内容 |
+|---|---|
+| `firmware/build/coefficients.txt` | 采样率、标定比例、高通/陷波参数与系数、SG 核 |
+| `firmware/build/raw_signal.csv` | `sample,adc_count,electrode_uv,clean_uv,hum_uv,wander_uv` |
+| `firmware/build/filtered_signal.csv` | `sample,notch_uv,filtered_uv,beat` |
 
-| 项目 | 代码中的条件 | 不应扩大为 |
+`beat` 列标记检测通知所在的样本，可用于按通知间期推算心率。安装 matplotlib 后，可通过 `python3 tools/verify_filters.py --plot` 查看合成输入、滤波输出及分析图。
+
+### 3. 演示与其他构建入口
+
+```bash
+# 10 s 主机合成信号：逐搏数据与 ASCII 波形
+make -C firmware demo CC=gcc
+```
+
+| Make 目标 | 作用 |
+|---|---|
+| `make -C firmware lib CC=gcc` | 将六个核心 C 模块归档为 `firmware/build/libecg.a` |
+| `make -C firmware size CC=gcc` | 查看主机对象文件尺寸 |
+| `make -C firmware arm` | 使用 GNU Arm Embedded 工具链进行 Cortex-M3 源文件编译检查 |
+
+以上为复现与工具入口；已执行命令按日期单独保存在 [验证记录](docs/VERIFICATION.md)。环境准备、各目标说明与测试输出解读见 [BUILD_AND_TEST.md](docs/BUILD_AND_TEST.md)。
+
+## 测试覆盖
+
+| 项目 | 主机测试条件 | 阅读入口 |
 |---|---|---|
-| 陷波 | 50 Hz 及五个漂移探针衰减不大于 -20 dB | 实板抑制深度、连续频带保证或最大通带插损 |
-| SG | 默认参数平均峰值保持至少 95%，最差单搏至少 93% | 任意真实 QRS 波形的形态保真保证 |
-| 心率 | 干净 7 档/含干扰 5 档合成信号稳态误差不超过 2 BPM | 临床准确率、灵敏度或特异度 |
-| 端到端 | 模拟 DMA/UART 字节流的数量、序号、载荷、CRC 与心率检查 | 真实 60 s 电极采集、采样零抖动或串口永不丢数据 |
+| 高通与陷波 | 系数、递推与响应检查；50 Hz 及 49.5/49.8/50.0/50.2/50.5 Hz 探针衰减不大于 -20 dB | [test_filters.c](firmware/test/test_filters.c) |
+| SG | 已知核、系数和/对称性、多项式复现、边缘与流式对齐；默认参数平均峰高至少 95%，最差单搏至少 93% | [test_filters.c](firmware/test/test_filters.c) |
+| QRS 与心率 | 干净 7 档、含干扰 5 档合成心率，稳态误差不超过 2 BPM | [test_heart_rate.c](firmware/test/test_heart_rate.c) |
+| 环形缓冲 | 容量、回绕、部分写入、顺序与慢消费者统计；Linux 400000 点双线程压力 | [test_ring_buffer.c](firmware/test/test_ring_buffer.c) |
+| 帧协议 | CRC、编解码回环、编码选择、半包/粘包、错误输入与重新同步 | [test_protocol.c](firmware/test/test_protocol.c) |
+| 标定与设备集成 | 模拟平台拟合；60 s 合成采样过程中的 DMA、DSP、UART 捕获、序号和报告校验 | [run_tests.c](firmware/test/run_tests.c) |
+| C / NumPy 一致性 | 系数重算、全链路逐点复现、单频分量及峰高分析 | [verify_filters.py](tools/verify_filters.py) |
 
-具体测量值必须取自对应日期/工具链的当前日志，不能沿用旧版“实测”表。
+GitHub Actions 使用 Ubuntu 22.04、`actions/checkout@v4` 和只读 `contents` 权限，执行 `make -C firmware -B test CC=gcc`。工作流配置见 [ci.yml](.github/workflows/ci.yml)，对应运行记录可从首页徽章进入。
 
 ## 源码导览
 
+公开目录以配置、算法、设备集成、平台接口、测试与技术文档组织：
+
+```text
+stm32-ecg-heart-rate-monitor/
+├── README.md
+├── firmware/
+│   ├── include/           公共接口、配置与数据结构
+│   ├── src/               六个 C99 核心模块
+│   ├── hal/               PC 合成采样与外设行为模型
+│   ├── test/              单元测试、集成回环、演示与数据导出
+│   ├── Makefile           主机构建、导出与编译检查入口
+│   └── platformio.ini     平台环境配置
+├── tools/                 NumPy 数值复核与可选绘图
+├── docs/                  设计、构建、协议与验证记录
+└── .github/workflows/     主机测试 CI
+```
+
 | 路径 | 内容与阅读价值 |
 |---|---|
-| [firmware/include/](firmware/include/) | 八个公共头文件；从 [ecg_config.h](firmware/include/ecg_config.h) 看默认参数和单位 |
-| [firmware/src/](firmware/src/) | 六个 C 实现；算法与设备集成的主要证据 |
-| [ecg_pipeline.c](firmware/src/ecg_pipeline.c) | 标定、DSP、DMA 回调、主循环组帧和 UART 发送 |
-| [iir_notch.c](firmware/src/iir_notch.c) / [savgol.c](firmware/src/savgol.c) | 高通/陷波的系数与状态，SG 核设计、边缘及流式处理 |
-| [heart_rate.c](firmware/src/heart_rate.c) | 阈值、启动、峰值细化、RR 与 HRV 的真实实现 |
-| [ring_buffer.c](firmware/src/ring_buffer.c) | 泛型 SPSC、掩码回绕、部分写入和统计 |
-| [frame_protocol.c](firmware/src/frame_protocol.c) | CRC、组帧、紧凑载荷与滑动窗口接收 |
-| [firmware/hal/](firmware/hal/) | 只有 PC 仿真桩；[hal.h](firmware/include/hal.h) 给出移植接口 |
-| [firmware/test/](firmware/test/) | 四个模块测试文件、测试入口和断言工具；含回环、CSV 导出与演示 |
-| [firmware/Makefile](firmware/Makefile) | 主机测试、静态库与 ARM 源码检查目标 |
-| [firmware/platformio.ini](firmware/platformio.ini) | 平台配置入口，不能代替缺失的板级端口与可烧录工程 |
-| [tools/verify_filters.py](tools/verify_filters.py) | NumPy 系数/滤波复核、信号质量分析及可选绘图 |
-| [.github/workflows/ci.yml](.github/workflows/ci.yml) | Ubuntu GCC 强制重编译与主机测试 |
+| [firmware/include/](firmware/include/) | 八个公共头文件，集中定义算法状态、设备结构、帧格式与 HAL 接口 |
+| [ecg_config.h](firmware/include/ecg_config.h) | 采样、滤波、RR、缓冲、组帧和数值类型的默认配置 |
+| [ecg_pipeline.h](firmware/include/ecg_pipeline.h) | 标定点、DSP 状态、设备上下文、运行统计与回调接口 |
+| [hal.h](firmware/include/hal.h) | 定时器、ADC/DMA、UART 与 GPIO 的平台操作接口 |
+| [firmware/src/](firmware/src/) | 六个 C99 实现，串联信号处理与设备数据流 |
+| [ecg_pipeline.c](firmware/src/ecg_pipeline.c) | 标定拟合、DSP 调用顺序、DMA 回调、主循环组帧和 UART 发送 |
+| [iir_notch.c](firmware/src/iir_notch.c) | 高通/陷波的系数设计、状态递推与频率响应计算 |
+| [savgol.c](firmware/src/savgol.c) | SG 核求解、整段边缘处理、流式窗口与噪声增益分析 |
+| [heart_rate.c](firmware/src/heart_rate.c) | 学习期、阈值更新、峰值细化、有效 RR 与 BPM/SQI 计算 |
+| [ring_buffer.c](firmware/src/ring_buffer.c) | 泛型 SPSC、掩码回绕、部分写入、索引发布和运行统计 |
+| [frame_protocol.c](firmware/src/frame_protocol.c) | CRC、组帧、PACK12/DELTA、报告字段与滑动窗口接收 |
+| [firmware/hal/](firmware/hal/) | [hal_stub.c](firmware/hal/hal_stub.c) 生成合成信号并模拟 DMA/UART；[hal_stub.h](firmware/hal/hal_stub.h) 暴露测试控制接口 |
+| [firmware/test/](firmware/test/) | 四个模块测试文件、测试入口与断言工具，覆盖回环、CSV 导出和演示 |
+| [run_tests.c](firmware/test/run_tests.c) | 组织测试套件；实现标定/整链路测试、合成数据导出与 ASCII 演示 |
+| [firmware/Makefile](firmware/Makefile) | 主机测试、演示、数据导出、静态库与 Cortex-M3 编译检查 |
+| [firmware/platformio.ini](firmware/platformio.ini) | STM32F103、STM32F411 与 native 环境的配置入口 |
+| [tools/verify_filters.py](tools/verify_filters.py) | 读取 C 导出数据，复算系数和滤波输出，生成信号分析与可选图表 |
+| [docs/](docs/) | 分层设计、算法推导、构建流程、协议字节示例和按日期整理的验证记录 |
+| [.github/workflows/ci.yml](.github/workflows/ci.yml) | Ubuntu GCC 强制重编译与主机测试工作流 |
 
 ### 建议的代码阅读路径
 
-1. 看 [配置](firmware/include/ecg_config.h) 和 [验证记录](docs/VERIFICATION.md)：先明确默认参数、已执行范围与工程未完成部分。
-2. 看 [测试入口](firmware/test/run_tests.c) 的 `test_pipeline_integration()`：从模拟数据源跟到 UART 捕获和逐帧校验。
-3. 看 [流水线](firmware/src/ecg_pipeline.c) 的 `ecg_pipeline_process()`、`ecg_device_task()`：建立单位、状态与调用关系。
-4. 看 [SG](firmware/src/savgol.c)、[陷波](firmware/src/iir_notch.c) 及 [滤波测试](firmware/test/test_filters.c)：核对公式、预热、延迟和指标定义。
-5. 看 [QRS](firmware/src/heart_rate.c) 及 [心率测试](firmware/test/test_heart_rate.c)：追踪学习、拒绝、接纳和中位数更新。
-6. 看 [协议](firmware/src/frame_protocol.c)、[环形缓冲](firmware/src/ring_buffer.c) 及各自测试：重点检查坏帧、容量不足与并发发布语义。
-7. 需要移植时再看 [HAL 接口](firmware/include/hal.h) 与 [设计文档](docs/DESIGN.md)，列出板级缺口，不直接把 PC 桩当驱动。
+1. 看 [配置](firmware/include/ecg_config.h) 和 [验证记录](docs/VERIFICATION.md)：掌握默认参数、数据单位、合成输入与测量方法。
+2. 看 [测试入口](firmware/test/run_tests.c) 的 `test_pipeline_integration()`：沿模拟采样源追踪到 UART 捕获和逐帧校验。
+3. 看 [流水线](firmware/src/ecg_pipeline.c) 的 `ecg_cal_fit()`、`ecg_pipeline_process()`、`ecg_device_task()`：串联标定、单样本状态与设备调度。
+4. 看 [SG](firmware/src/savgol.c)、[陷波](firmware/src/iir_notch.c) 及 [滤波测试](firmware/test/test_filters.c)：对照系数求解、预热、延迟对齐和指标定义。
+5. 看 [QRS](firmware/src/heart_rate.c) 及 [心率测试](firmware/test/test_heart_rate.c)：追踪学习、峰值筛选、RR 接纳与中位数更新。
+6. 看 [协议](firmware/src/frame_protocol.c)、[环形缓冲](firmware/src/ring_buffer.c) 及 [协议测试](firmware/test/test_protocol.c)、[缓冲测试](firmware/test/test_ring_buffer.c)：核对字节布局、重新同步、容量管理与并发发布语义。
+7. 看 [HAL 接口](firmware/include/hal.h)、[PC 模型](firmware/hal/hal_stub.c) 与 [设计文档](docs/DESIGN.md)：理解平台调用契约及设备层和算法层的衔接。
 
-## 已知限制与后续验收
+## 使用说明
 
-- **真实硬件缺口：** 没有电路设计文件、RLD/保护/隔离验证、目标板驱动或实测记录。PC 桩只是波形加干扰、增益/偏置、理想量化与回调模型，未建模模拟高低通、共模回路或抗混叠效果。
-- **算法适用范围：** 输入以规则合成形态为主，尚未覆盖真实病理波形、电极脱落、运动伪迹的完整范围；SG/高通会改变波形，不能称为诊断信号保真。
-- **HRV 单位问题：** 当前 `sdnn_ms` 缺少 `1000/fs` 换算，周期测试不暴露这个问题；接口存在不代表 HRV 已完成正确性验证。
-- **测试统计问题：** 通带测试取的是探针衰减中最接近 0 dB 的值，不能推出最大插损上界；SG 默认参数也未被断言为全局最优。
-- **数据尾部与背压：** 停止不会补发未完成块；TX 环可能部分写入，UART 前先移除待发字节，短写/零写会记丢失但不重试，可能留下损坏帧。
-- **并发与移植：** 设备中断绑定是单实例；环形缓冲只支持 SPSC，非 GNU 屏障为空，CRC 表首次初始化无线程同步；运行中重置需先停生产/消费。
-- **接收器容错边界：** 没有坏长度等待超时，载荷校验并非完全严格；批量接收输出数组不足时会消费并丢弃额外帧，详见协议文档。
-- **目标资源未测：** 未提供 MCU 链接 map、栈峰值、最坏执行时间或功耗；默认 double、SG 初始化矩阵等需要单独评估，不能宣称 `<4 us/样本` 或 `<0.1% CPU`。
-
-下一步应先完善可核验的板级工程与数据丢失处理，再补真实公开数据集评估和目标 MCU 测量。新增结果应同时保留环境、输入、命令、判据和限制。
-
-## 使用与来源边界
-
-本项目用于学习嵌入式数据流、数字滤波和协议测试，**不是医疗器械，不用于诊断、报警或治疗决策**。本仓库不足以支持安全的人体连接，不应将普通开发板/USB 接线直接用于人体实验。
-
-文档依据当前文件描述实现与验证，不凭“没有版权头”推断全部原创、无外部参考或完整作者贡献，也不补写无法核验的引用/授权。算法名称、标准测试向量与代码所有权是不同问题；贡献归属和外部材料许可应以可核验的历史及来源记录为准。
+本项目用于学习与工程研究，**不用于诊断、医疗报警或治疗决策**；人体连接须采用经专业验证的隔离与电气安全方案，勿将普通开发板或 USB 接线直接用于人体实验。
