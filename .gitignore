@@ -1,0 +1,25 @@
+# build output
+firmware/build/
+*.o
+*.d
+*.a
+*.elf
+*.bin
+*.hex
+*.map
+
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# Python
+__pycache__/
+*.pyc
+
+# editors / OS
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
