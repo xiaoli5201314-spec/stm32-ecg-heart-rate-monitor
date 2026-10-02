@@ -90,7 +90,13 @@ Python 目前没有减去导出的标定截距，打印的 `calibration` 差异�
 | ASCII 演示：`make -C firmware demo CC=gcc` | 待执行/待记录 |
 | 主机静态库：`make -C firmware lib CC=gcc` | 待执行/待记录 |
 | Cortex-M3 源文件检查：`make -C firmware arm` | 待执行/待记录；不是固件链接或烧录 |
-| GitHub Actions | CI 已配置，远程运行待验证 |
+| GitHub Actions | 2026-10-03 已核对远端主机测试成功，见下节 |
 | 真实板级采集、硬件标定、实时性/资源测量 | 尚无仓库可核验的证据 |
 
 这里只记录对应日期与命令的已核验结果，没有沿用旧版无执行依据的硬件“实测”、固定带宽、增益误差或时间预算。新增指标应一并保留工具链、输入、命令、判据和完整输出。
+
+## 远端自动测试
+
+2026-10-03 核对发布提交 `1a97fe6` 的 [GitHub Actions 记录](https://github.com/xiaoli5201314-spec/stm32-ecg-heart-rate-monitor/actions/runs/37051313115)，状态为 `completed / success`。
+工作流在 Ubuntu 22.04 执行 `make -C firmware -B test CC=gcc`。
+后续提交的实时状态以首页徽章和对应 Actions 记录为准；本条远端记录不包含 NumPy 复核或板级测试。
