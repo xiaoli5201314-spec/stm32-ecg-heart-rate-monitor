@@ -1,0 +1,26 @@
+name: Host Firmware Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  firmware-tests:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check Out Sources
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Show Toolchain
+        run: |
+          gcc --version
+          make --version
+
+      - name: Build and Run Host Tests
+        run: make -C firmware -B test CC=gcc
